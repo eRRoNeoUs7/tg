@@ -1,29 +1,29 @@
 from flask import Flask, jsonify, request
 import praw
 import os
-from libsql_client import create_client
+import libsql # Yeni kütüphane
 
 app = Flask(__name__)
 
-# Yapılandırma
-API_KEY = os.getenv("INTERNAL_API_KEY", "varsayilan_sifre") # cron-job.org'da kullanacağız
+API_KEY = os.getenv("INTERNAL_API_KEY", "varsayilan_sifre")
 TURSO_URL = os.getenv("TURSO_URL")
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN")
 
-# Reddit ve Turso Bağlantıları
-def get_reddit():
-    return praw.Reddit(
+def sync_data():
+    # Libsql (SQLite uyumlu) bağlantısı
+    # Bu kütüphane event loop gerektirmez, Flask ile doğrudan çalışır
+    conn = libsql.connect(database=TURSO_URL, auth_token=TURSO_AUTH_TOKEN)
+    cursor = conn.cursor()
+    
+    # Reddit Bağlantısı
+    reddit = praw.Reddit(
         client_id=os.getenv("REDDIT_CLIENT_ID"),
         client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
         user_agent="web:reddit-fetcher:v1.0"
     )
 
-def sync_data():
-    client = create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN)
-    reddit = get_reddit()
-    
-    # Tabloyu hazırla
-    client.execute("CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, title TEXT, subreddit TEXT, created_at REAL)")
+    # Tabloyu oluştur
+    cursor.execute("CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, title TEXT, subreddit TEXT, created_at REAL)")
     
     subreddits = ["python", "datascience", "technology"]
     count = 0
@@ -31,15 +31,16 @@ def sync_data():
     for sub_name in subreddits:
         for submission in reddit.subreddit(sub_name).new(limit=5):
             try:
-                client.execute(
+                cursor.execute(
                     "INSERT INTO posts (id, title, subreddit, created_at) VALUES (?, ?, ?, ?)",
                     (submission.id, submission.title, sub_name, submission.created_utc)
                 )
                 count += 1
             except:
-                continue
+                continue # Duplicate kayıtları atla
     
-    client.close()
+    conn.commit() # Değişiklikleri kaydet
+    conn.close()
     return count
 
 @app.route('/')
@@ -48,7 +49,6 @@ def home():
 
 @app.route('/trigger-sync')
 def trigger():
-    # Basit güvenlik kontrolü
     key = request.args.get('key')
     if key != API_KEY:
         return jsonify({"error": "Yetkisiz erişim"}), 403
@@ -57,9 +57,10 @@ def trigger():
         new_posts = sync_data()
         return jsonify({"status": "success", "added": new_posts}), 200
     except Exception as e:
+        # Hatanın ne olduğunu daha net görmek için:
+        print(f"Hata Detayı: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
-    # Render portu otomatik atar
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
