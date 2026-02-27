@@ -1,53 +1,65 @@
-import telebot
-import libsql_client
+from flask import Flask, jsonify, request
+import praw
 import os
+from libsql_client import create_client
 
-# Şifreleri ve ID'leri sistemden (Koyeb'den) çekiyoruz
-TOKEN = os.environ.get('BOT_TOKEN')
-CHANNEL_ID = os.environ.get('CHANNEL_ID')
-TURSO_URL = os.environ.get('TURSO_URL')
-TURSO_TOKEN = os.environ.get('TURSO_TOKEN')
+app = Flask(__name__)
 
-bot = telebot.TeleBot(TOKEN)
+# Yapılandırma
+API_KEY = os.getenv("INTERNAL_API_KEY", "varsayilan_sifre") # cron-job.org'da kullanacağız
+TURSO_URL = os.getenv("TURSO_URL")
+TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN")
 
-# Turso Veritabanına Bağlan
-client = libsql_client.create_client_sync(url=TURSO_URL, auth_token=TURSO_TOKEN)
-
-# Veritabanı Tablosu Kurulumu
-client.execute('''
-    CREATE TABLE IF NOT EXISTS videos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        file_id TEXT, 
-        description TEXT
+# Reddit ve Turso Bağlantıları
+def get_reddit():
+    return praw.Reddit(
+        client_id=os.getenv("REDDIT_CLIENT_ID"),
+        client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
+        user_agent="web:reddit-fetcher:v1.0"
     )
-''')
 
-@bot.channel_post_handler(content_types=['video'])
-def index_video(message):
-    if str(message.chat.id) == CHANNEL_ID:
-        file_id = message.video.file_id
-        description = message.caption.lower() if message.caption else "isimsiz_video"
-        
-        client.execute(
-            "INSERT INTO videos (file_id, description) VALUES (?, ?)", 
-            [file_id, description]
-        )
-
-@bot.message_handler(func=lambda message: True)
-def search_video(message):
-    keyword = message.text.lower()
+def sync_data():
+    client = create_client(url=TURSO_URL, auth_token=TURSO_AUTH_TOKEN)
+    reddit = get_reddit()
     
-    result = client.execute(
-        "SELECT file_id FROM videos WHERE description LIKE ?", 
-        ['%' + keyword + '%']
-    )
+    # Tabloyu hazırla
+    client.execute("CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, title TEXT, subreddit TEXT, created_at REAL)")
+    
+    subreddits = ["python", "datascience", "technology"]
+    count = 0
+    
+    for sub_name in subreddits:
+        for submission in reddit.subreddit(sub_name).new(limit=5):
+            try:
+                client.execute(
+                    "INSERT INTO posts (id, title, subreddit, created_at) VALUES (?, ?, ?, ?)",
+                    (submission.id, submission.title, sub_name, submission.created_utc)
+                )
+                count += 1
+            except:
+                continue
+    
+    client.close()
+    return count
 
-    if result.rows:
-        bot.reply_to(message, f"{len(result.rows)} adet video bulundu. Gönderiliyor...")
-        for row in result.rows:
-            bot.send_video(message.chat.id, row[0])
-    else:
-        bot.reply_to(message, "Üzgünüm, bu aramayla eşleşen bir video bulamadım.")
+@app.route('/')
+def home():
+    return "Reddit Fetcher is Running!", 200
 
-print("Bot çalışıyor ve Turso'ya bağlandı...")
-bot.polling(non_stop=True)
+@app.route('/trigger-sync')
+def trigger():
+    # Basit güvenlik kontrolü
+    key = request.args.get('key')
+    if key != API_KEY:
+        return jsonify({"error": "Yetkisiz erişim"}), 403
+    
+    try:
+        new_posts = sync_data()
+        return jsonify({"status": "success", "added": new_posts}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+if __name__ == "__main__":
+    # Render portu otomatik atar
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
