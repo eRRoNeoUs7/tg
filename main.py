@@ -25,11 +25,11 @@ def sync_data():
     # Tabloyu oluştur
     cursor.execute("CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, title TEXT, subreddit TEXT, created_at REAL)")
     
-    subreddits = ["python", "datascience", "technology"]
+    subreddits = ["Nsfw_Hikayeler"]
     count = 0
     
     for sub_name in subreddits:
-        for submission in reddit.subreddit(sub_name).new(limit=5):
+        for submission in reddit.subreddit(sub_name).new(limit=25):
             try:
                 cursor.execute(
                     "INSERT INTO posts (id, title, subreddit, created_at) VALUES (?, ?, ?, ?)",
