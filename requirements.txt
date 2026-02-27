@@ -2,6 +2,3 @@ flask
 gunicorn
 praw
 libsql
-os
-re
-time
